@@ -317,10 +317,22 @@ set -e; \
 package=$(2)@$(3) ;\
 echo "Downloading $${package}" ;\
 if [ -n "$$GOOS" ] && [ -n "$$GOARCH" ]; then \
-  GOBIN=$(LOCALBIN) go install $${package} ;\
+  # When GOOS/GOARCH are set, don't use GOBIN (Go restriction for cross-compile) \
+  # Install to default location, then move to LOCALBIN \
+  go install $${package} ;\
+  BINARY_NAME=$$(basename "$$(echo "$(1)" | sed "s/-$(3)$$//")") ;\
+  if [ -f "$$(go env GOPATH)/bin/$$BINARY_NAME" ]; then \
+    mv "$$(go env GOPATH)/bin/$$BINARY_NAME" $(1) ;\
+  elif [ -f "$$(go env GOBIN)/$$BINARY_NAME" ]; then \
+    mv "$$(go env GOBIN)/$$BINARY_NAME" $(1) ;\
+  else \
+    echo "ERROR: Binary $$BINARY_NAME not found after install" ;\
+    exit 1 ;\
+  fi ;\
 else \
+  # Default: cross-compile to linux/amd64 with GOBIN \
   GOOS=linux GOARCH=amd64 GOBIN=$(LOCALBIN) go install $${package} ;\
+  mv "$$(echo "$(1)" | sed "s/-$(3)$$//")" $(1) ;\
 fi ;\
-mv "$$(echo "$(1)" | sed "s/-$(3)$$//")" $(1) ;\
 }
 endef

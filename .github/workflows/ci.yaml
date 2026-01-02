@@ -231,10 +231,9 @@ jobs:
       - name: Install build dependencies
         run: |
           # For ARM64 runners, compile controller-gen natively (not cross-compile)
-          # Set GOOS/GOARCH to native architecture to avoid cross-compile issues
+          # Set GOOS/GOARCH to native architecture - Makefile will handle GOBIN correctly
           export GOOS=${{ matrix.goos }}
           export GOARCH=${{ matrix.goarch }}
-          unset GOBIN
           make controller-gen
       - name: Generate manifests and code
         run: make manifests generate
