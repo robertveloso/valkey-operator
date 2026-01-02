@@ -698,7 +698,40 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
             -u ${{ github.actor }} \
             --password-stdin
+      - name: Generate Helm Chart
+        env:
+          REGISTRY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -ex
+          make helm-gen V=1 IMG=ghcr.io/${{ github.repository_owner }}/valkey-operator:${{ needs.auto-tag.outputs.tag }}
+      - name: Validate Helm Chart
+        run: |
+          set -ex
+          if [ ! -d "valkey-operator" ]; then
+            echo "ERROR: valkey-operator directory not found"
+            exit 1
+          fi
+          echo "Validating Helm chart structure..."
+          helm lint valkey-operator || (echo "Helm lint failed" && exit 1)
+          echo "Testing Helm template rendering..."
+          helm template valkey-operator --debug > /tmp/rendered.yaml 2>&1 || (echo "Helm template failed" && cat /tmp/rendered.yaml && exit 1)
+          echo "✅ Helm chart validation passed"
       - name: Package and Upload Helm Chart
         env:
           REGISTRY_OWNER: ${{ github.repository_owner }}
-        run: make helm-publish V=1 IMG=ghcr.io/${{ github.repository_owner }}/valkey-operator:${{ needs.auto-tag.outputs.tag }}
+          REGISTRY: ghcr.io/${{ github.repository_owner }}
+        run: |
+          set -ex
+          VERSION="${{ needs.auto-tag.outputs.tag }}"
+          echo "Packaging Helm chart with version: $VERSION"
+          make helm-package V=1 IMG=ghcr.io/${{ github.repository_owner }}/valkey-operator:$VERSION
+          CHART_FILE="valkey-operator-${VERSION}-chart.tgz"
+          if [ ! -f "$CHART_FILE" ]; then
+            echo "ERROR: Chart file not found: $CHART_FILE"
+            ls -la *.tgz || echo "No .tgz files found"
+            exit 1
+          fi
+          echo "✅ Chart packaged: $CHART_FILE"
+          echo "Pushing chart to registry..."
+          make helm-publish V=1 IMG=ghcr.io/${{ github.repository_owner }}/valkey-operator:$VERSION
+          echo "✅ Chart published successfully"

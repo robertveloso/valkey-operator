@@ -247,10 +247,17 @@ GOSEC_VERSION ?= v2.22.1
 helm-gen: manifests kustomize helmify ## Generate Helm chart from Kustomize manifests
 	$Qcd config/manager && $(KUSTOMIZE) edit set image controller=${IMG_CONTROLLER}
 	$Q$(KUSTOMIZE) build config/default | $(HELMIFY) -crd-dir valkey-operator
-	$Qsed s@\\\(app.kubernetes.io/name\\\)@\'\\\1\'@ -i valkey-operator/templates/deployment.yaml
-	$Qsed s@\\\(app.kubernetes.io/instance\\\)@\'\\\1\'@ -i valkey-operator/templates/deployment.yaml
+	$Qif [ -f valkey-operator/templates/deployment.yaml ]; then \
+		sed s@\\\(app.kubernetes.io/name\\\)@\'\\\1\'@ -i valkey-operator/templates/deployment.yaml && \
+		sed s@\\\(app.kubernetes.io/instance\\\)@\'\\\1\'@ -i valkey-operator/templates/deployment.yaml || \
+		(echo "WARNING: sed failed on deployment.yaml, continuing..." && true); \
+	else \
+		echo "WARNING: valkey-operator/templates/deployment.yaml not found, skipping sed"; \
+	fi
 
 helm-package: helm-gen helm ## Package Helm chart
+	$Q$(HELM) lint valkey-operator || (echo "ERROR: Helm lint failed" && exit 1)
+	$Q$(HELM) template valkey-operator > /dev/null || (echo "ERROR: Helm template validation failed" && exit 1)
 	$Q$(HELM) package valkey-operator --app-version $(VERSION) --version $(VERSION)-chart
 
 helm-publish: helm-package ## Publish Helm chart
