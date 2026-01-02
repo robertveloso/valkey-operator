@@ -18,12 +18,10 @@ env:
   IMAGE_NAME: ${{ github.repository }}
   VALKEY_VERSION: 9.0.1
 
+# Default permissions (can be overridden per job)
 permissions:
-  contents: write
-  packages: write
-  id-token: write
-  security-events: write
-  attestations: write
+  contents: read
+  packages: read
   actions: read
 
 jobs:
@@ -34,6 +32,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -48,6 +48,8 @@ jobs:
   hadolint:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
     strategy:
       matrix:
         dockerfile: [Dockerfile.controller, Dockerfile.sidecar]
@@ -78,9 +80,8 @@ jobs:
   build-binaries-pr:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
-    outputs:
-      goos: linux
-      goarch: amd64
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -88,14 +89,15 @@ jobs:
           go-version: 1.25
       - name: Install build dependencies
         run: |
-          # For PRs, always use amd64 (native on GitHub runners)
-          export GOOS=linux
-          export GOARCH=amd64
-          unset GOBIN
+          # Tools must be compiled for host, never inherit GOOS/GOARCH
+          unset GOOS GOARCH GOBIN
           make controller-gen
       - name: Generate manifests and code
-        run: make manifests generate
-      - name: Build binaries (amd64 only for PRs)
+        run: |
+          # Generate once (architecture-independent)
+          unset GOOS GOARCH
+          make manifests generate
+      - name: Build binaries (validation only, no artifacts needed)
         run: |
           make V=1 GOOS=linux GOARCH=amd64 manager sidecar
           if [ ! -f "manager" ] || [ ! -f "sidecar" ]; then
@@ -103,16 +105,7 @@ jobs:
             ls -la
             exit 1
           fi
-          echo "Build successful"
-          ls -lh manager sidecar
-      - name: Upload binaries
-        uses: actions/upload-artifact@v6
-        with:
-          name: binaries-amd64
-          path: |
-            manager
-            sidecar
-          retention-days: 1
+          echo "Build successful - binaries validated"
 
   scan-pr:
     runs-on: ubuntu-latest
@@ -230,13 +223,15 @@ jobs:
           go-version: 1.25
       - name: Install build dependencies
         run: |
-          # For ARM64 runners, compile controller-gen natively (not cross-compile)
-          # Set GOOS/GOARCH to native architecture - Makefile will handle GOBIN correctly
-          export GOOS=${{ matrix.goos }}
-          export GOARCH=${{ matrix.goarch }}
+          # Tools must be compiled for host, never inherit GOOS/GOARCH
+          unset GOOS GOARCH GOBIN
           make controller-gen
       - name: Generate manifests and code
-        run: make manifests generate
+        if: matrix.goarch == 'amd64'
+        run: |
+          # Generate once (architecture-independent) - only on amd64
+          unset GOOS GOARCH
+          make manifests generate
       - name: Build binaries
         run: |
           DATE=$(date -u +'%Y%m%d')
