@@ -88,7 +88,9 @@ jobs:
           go-version: 1.25
       - name: Install build dependencies
         run: |
-          # Unset GOBIN to allow cross-compilation of tools
+          # For PRs, always use amd64 (native on GitHub runners)
+          export GOOS=linux
+          export GOARCH=amd64
           unset GOBIN
           make controller-gen
       - name: Generate manifests and code
@@ -228,7 +230,10 @@ jobs:
           go-version: 1.25
       - name: Install build dependencies
         run: |
-          # Unset GOBIN to allow cross-compilation of tools
+          # For ARM64 runners, compile controller-gen natively (not cross-compile)
+          # Set GOOS/GOARCH to native architecture to avoid cross-compile issues
+          export GOOS=${{ matrix.goos }}
+          export GOARCH=${{ matrix.goarch }}
           unset GOBIN
           make controller-gen
       - name: Generate manifests and code
