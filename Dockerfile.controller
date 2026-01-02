@@ -1,4 +1,4 @@
 FROM gcr.io/distroless/static:nonroot
-COPY manager /manager
+COPY --chmod=755 manager /manager
 USER 65532:65532
 ENTRYPOINT ["/manager"]

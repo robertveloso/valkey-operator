@@ -1,4 +1,4 @@
 FROM gcr.io/distroless/static:nonroot
-COPY sidecar /sidecar
+COPY --chmod=755 sidecar /sidecar
 USER 65532:65532
 ENTRYPOINT ["/sidecar"]
