@@ -87,7 +87,12 @@ jobs:
         with:
           go-version: 1.25
       - name: Install build dependencies
-        run: make controller-gen
+        run: |
+          # Unset GOBIN to allow cross-compilation of tools
+          unset GOBIN
+          make controller-gen
+      - name: Generate manifests and code
+        run: make manifests generate
       - name: Build binaries (amd64 only for PRs)
         run: |
           make V=1 GOOS=linux GOARCH=amd64 manager sidecar
@@ -222,7 +227,10 @@ jobs:
         with:
           go-version: 1.25
       - name: Install build dependencies
-        run: make controller-gen
+        run: |
+          # Unset GOBIN to allow cross-compilation of tools
+          unset GOBIN
+          make controller-gen
       - name: Generate manifests and code
         run: make manifests generate
       - name: Build binaries
