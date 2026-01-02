@@ -117,8 +117,21 @@ jobs:
         id: go_build
         run: |
           platform=${{ matrix.platform }}
+          GOOS=${platform%/*}
+          GOARCH=${platform#*/}
           echo "Building for $GOOS/$GOARCH"
-          make V=1 GOOS=${platform%/*} GOARCH=${platform#*/}
+          # Ensure dependencies are installed first
+          make controller-gen
+          # Build binaries
+          make V=1 GOOS=$GOOS GOARCH=$GOARCH manager sidecar
+          # Verify binaries were created
+          if [ ! -f "manager" ] || [ ! -f "sidecar" ]; then
+            echo "ERROR: Build failed - binaries not found"
+            ls -la
+            exit 1
+          fi
+          echo "Build successful - binaries created"
+          ls -lh manager sidecar
       - name: Build and push Docker image
         id: docker_build_controller
         uses: docker/build-push-action@v6
@@ -290,7 +303,7 @@ jobs:
 
       - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
-        if: always()
+        if: always() && hashFiles('trivy-results.sarif') != ''
         with:
           sarif_file: 'trivy-results.sarif'
         #env:

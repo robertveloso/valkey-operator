@@ -96,7 +96,23 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v6
-
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: 1.25
+      - name: Install build dependencies
+        run: make controller-gen
+      - name: Build binaries
+        run: |
+          make V=1 manager sidecar
+          # Verify binaries were created
+          if [ ! -f "manager" ] || [ ! -f "sidecar" ]; then
+            echo "ERROR: Build failed - binaries not found"
+            ls -la
+            exit 1
+          fi
+          echo "Build successful - binaries created"
+          ls -lh manager sidecar
       - name: Build the Controller image
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         id: docker_build_controller
@@ -113,6 +129,6 @@ jobs:
           output: 'trivy-results.sarif'
       - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
-        if: always()
+        if: always() && hashFiles('trivy-results.sarif') != ''
         with:
           sarif_file: trivy-results.sarif
