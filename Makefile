@@ -19,7 +19,7 @@ KUBECTL := $(shell which kubectl)
 VERSION ?= $(shell  if [ ! -z $$(git tag --points-at HEAD) ] ; then git tag --points-at HEAD|cat ; else  git rev-parse --short HEAD|cat; fi )
 DATE ?= $(shell date -u  +'%Y%m%d')
 SHA ?= $(shell git rev-parse --short HEAD)
-PKG ?= oxlayer.io/valkey-operator
+PKG ?= $(REGISTRY_OWNER)/valkey-operator
 GOOS ?= linux
 GOARCH ?= amd64
 
@@ -37,7 +37,7 @@ SHELL = /usr/bin/env bash -o pipefail
 K8S_VERSION ?= 1.33.4
 ENVTEST_K8S_VERSION = $(K8S_VERSION)
 CILIUM_VERSION ?= 1.18.2
-VALKEY_VERSION ?= 8.1.4
+VALKEY_VERSION ?= 9.0.1
 
 V ?= 0
 ifeq ($(V), 1)
@@ -261,7 +261,7 @@ helm-package: helm-gen helm ## Package Helm chart
 	$Q$(HELM) package valkey-operator --app-version $(VERSION) --version $(VERSION)-chart
 
 helm-publish: helm-package ## Publish Helm chart
-	$Q$(HELM) push valkey-operator-$(VERSION)-chart.tgz oci://ghcr.io/$(REGISTRY_OWNER)
+	$Q$(HELM) push valkey-operator-$(VERSION)-chart.tgz oci://$(REGISTRY)
 
 .PHONY: tunnel registry-proxy prometheus-proxy
 tunnel: ## turn on minikube's tunnel to test ingress and get UI access
@@ -316,20 +316,7 @@ define go-install-tool
 set -e; \
 package=$(2)@$(3) ;\
 echo "Downloading $${package}" ;\
-if [ -n "$$GOOS" ] && [ -n "$$GOARCH" ]; then \
-  unset GOBIN ;\
-  go install $${package} ;\
-  BINARY_NAME=$$(basename "$$(echo "$(1)" | sed "s/-$(3)$$//")") ;\
-  GOPATH_BIN="$$(go env GOPATH)/bin/$$BINARY_NAME" ;\
-  if [ -f "$$GOPATH_BIN" ]; then \
-    mv "$$GOPATH_BIN" $(1) ;\
-  else \
-    echo "ERROR: Binary $$BINARY_NAME not found in $$GOPATH_BIN" ;\
-    exit 1 ;\
-  fi ;\
-else \
-  GOOS=linux GOARCH=amd64 GOBIN=$(LOCALBIN) go install $${package} ;\
-  mv "$$(echo "$(1)" | sed "s/-$(3)$$//")" $(1) ;\
-fi ;\
+GOOS=linux GOARCH=amd64 GOBIN=$(LOCALBIN) go install $${package} ;\
+mv "$$(echo "$(1)" | sed "s/-$(3)$$//")" $(1) ;\
 }
 endef
