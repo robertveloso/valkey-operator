@@ -19,6 +19,8 @@ env:
   VALKEY_VERSION: 9.0.1
 
 # Default permissions (can be overridden per job)
+# Note: packages: read is included by default as most jobs need to read from GHCR
+# Individual jobs override this when they need write access or additional permissions
 permissions:
   contents: read
   packages: read
@@ -276,8 +278,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
-      attestations: write
     steps:
       - name: Prepare
         run: |
@@ -321,8 +321,7 @@ jobs:
           cache-from: type=gha
           # cache-to: type=gha,mode=max
           labels: ${{ steps.meta_controller.outputs.labels }}
-          tags: ${{ steps.meta_controller.outputs.tags }}
-          outputs: type=image,push=true
+          outputs: type=image,"name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
       - name: Build and push Sidecar image
         id: docker_build_sidecar
         uses: docker/build-push-action@v6
@@ -333,67 +332,28 @@ jobs:
           cache-from: type=gha
           # cache-to: type=gha,mode=max
           labels: ${{ steps.meta_sidecar.outputs.labels }}
-          tags: ${{ steps.meta_sidecar.outputs.tags }}
-          outputs: type=image,push=true
-      - name: Get digests for attestation
-        id: get_digests
-        run: |
-          # Obter digest do Controller usando a tag (com retry para aguardar propagação)
-          for i in {1..5}; do
-            CONTROLLER_DIGEST=$(docker buildx imagetools inspect \
-              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_VERSION }} \
-              --format '{{json .}}' 2>/dev/null | jq -r '.manifest.digest // .digest // empty' || echo "")
-            if [ -n "$CONTROLLER_DIGEST" ] && [ "$CONTROLLER_DIGEST" != "null" ] && [ "$CONTROLLER_DIGEST" != "" ]; then
-              break
-            fi
-            echo "Attempt $i/5: Waiting for Controller image to be available..."
-            sleep 2
-          done
-          if [ -z "$CONTROLLER_DIGEST" ] || [ "$CONTROLLER_DIGEST" = "null" ]; then
-            echo "ERROR: Failed to get Controller digest after retries"
-            docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_VERSION }} || true
-            exit 1
-          fi
-          echo "Controller digest: $CONTROLLER_DIGEST"
-          echo "controller_digest=$CONTROLLER_DIGEST" >> $GITHUB_OUTPUT
-
-          # Obter digest do Sidecar usando a tag (com retry para aguardar propagação)
-          for i in {1..5}; do
-            SIDECAR_DIGEST=$(docker buildx imagetools inspect \
-              ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ env.RELEASE_VERSION }} \
-              --format '{{json .}}' 2>/dev/null | jq -r '.manifest.digest // .digest // empty' || echo "")
-            if [ -n "$SIDECAR_DIGEST" ] && [ "$SIDECAR_DIGEST" != "null" ] && [ "$SIDECAR_DIGEST" != "" ]; then
-              break
-            fi
-            echo "Attempt $i/5: Waiting for Sidecar image to be available..."
-            sleep 2
-          done
-          if [ -z "$SIDECAR_DIGEST" ] || [ "$SIDECAR_DIGEST" = "null" ]; then
-            echo "ERROR: Failed to get Sidecar digest after retries"
-            docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ env.RELEASE_VERSION }} || true
-            exit 1
-          fi
-          echo "Sidecar digest: $SIDECAR_DIGEST"
-          echo "sidecar_digest=$SIDECAR_DIGEST" >> $GITHUB_OUTPUT
-      - name: Attest Controller image
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.get_digests.outputs.controller_digest }}
-          push-to-registry: true
-      - name: Attest Sidecar image
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar
-          subject-digest: ${{ steps.get_digests.outputs.sidecar_digest }}
-          push-to-registry: true
-      - name: Export digests
+          outputs: type=image,"name=${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar",push-by-digest=true,name-canonical=true,push=true
+      - name: Export digests (for manifest list creation)
         run: |
           mkdir -p ${{ runner.temp }}/digests/controller
           mkdir -p ${{ runner.temp }}/digests/sidecar
-          CONTROLLER_DIGEST="${{ steps.get_digests.outputs.controller_digest }}"
-          SIDECAR_DIGEST="${{ steps.get_digests.outputs.sidecar_digest }}"
+
+          # Obter digest do Controller (push-by-digest retorna o digest no output)
+          CONTROLLER_DIGEST="${{ steps.docker_build_controller.outputs.digest }}"
+          if [ -z "$CONTROLLER_DIGEST" ] || [ "$CONTROLLER_DIGEST" = "" ]; then
+            echo "ERROR: Failed to get Controller digest from build output"
+            exit 1
+          fi
+          echo "Controller digest (${{ matrix.platform }}): $CONTROLLER_DIGEST"
           touch "${{ runner.temp }}/digests/controller/${CONTROLLER_DIGEST#sha256:}"
+
+          # Obter digest do Sidecar (push-by-digest retorna o digest no output)
+          SIDECAR_DIGEST="${{ steps.docker_build_sidecar.outputs.digest }}"
+          if [ -z "$SIDECAR_DIGEST" ] || [ "$SIDECAR_DIGEST" = "" ]; then
+            echo "ERROR: Failed to get Sidecar digest from build output"
+            exit 1
+          fi
+          echo "Sidecar digest (${{ matrix.platform }}): $SIDECAR_DIGEST"
           touch "${{ runner.temp }}/digests/sidecar/${SIDECAR_DIGEST#sha256:}"
       - name: Upload digests
         uses: actions/upload-artifact@v6
@@ -409,6 +369,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      controller_manifest_digest: ${{ steps.get_manifest_digests.outputs.controller_manifest_digest }}
+      sidecar_manifest_digest: ${{ steps.get_manifest_digests.outputs.sidecar_manifest_digest }}
+      valkey_manifest_digest: ${{ steps.get_manifest_digests.outputs.valkey_manifest_digest }}
     steps:
       - name: Set RELEASE_VERSION
         run: |
@@ -437,11 +401,21 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: ${{ env.RELEASE_VERSION }}
       - name: Create manifest list (Controller)
+        id: create_manifest_controller
         working-directory: ${{ runner.temp }}/digests
         run: |
           cd controller
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+          OUTPUT=$(docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *) 2>&1)
+          # Extract digest from output (format: "sha256:...")
+          CONTROLLER_DIGEST=$(echo "$OUTPUT" | grep -oE 'sha256:[a-f0-9]{64}' | head -n1 || echo "")
+          if [ -z "$CONTROLLER_DIGEST" ]; then
+            echo "ERROR: Failed to extract Controller manifest digest from output"
+            echo "Output: $OUTPUT"
+            exit 1
+          fi
+          echo "controller_manifest_digest=$CONTROLLER_DIGEST" >> $GITHUB_OUTPUT
+          echo "Controller manifest digest: $CONTROLLER_DIGEST"
       - name: Docker meta (Sidecar)
         id: meta_sidecar
         uses: docker/metadata-action@v5
@@ -449,11 +423,21 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar
           tags: ${{ env.RELEASE_VERSION }}
       - name: Create manifest list (Sidecar)
+        id: create_manifest_sidecar
         working-directory: ${{ runner.temp }}/digests
         run: |
           cd sidecar
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar@sha256:%s ' *)
+          OUTPUT=$(docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar@sha256:%s ' *) 2>&1)
+          # Extract digest from output (format: "sha256:...")
+          SIDECAR_DIGEST=$(echo "$OUTPUT" | grep -oE 'sha256:[a-f0-9]{64}' | head -n1 || echo "")
+          if [ -z "$SIDECAR_DIGEST" ]; then
+            echo "ERROR: Failed to extract Sidecar manifest digest from output"
+            echo "Output: $OUTPUT"
+            exit 1
+          fi
+          echo "sidecar_manifest_digest=$SIDECAR_DIGEST" >> $GITHUB_OUTPUT
+          echo "Sidecar manifest digest: $SIDECAR_DIGEST"
       - name: Docker meta (Valkey)
         id: meta_valkey
         uses: docker/metadata-action@v5
@@ -461,21 +445,151 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey
           tags: ${{ env.VALKEY_VERSION }}
       - name: Create manifest list (Valkey)
+        id: create_manifest_valkey
         working-directory: ${{ runner.temp }}/digests
         run: |
           cd valkey
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey@sha256:%s ' *)
+          OUTPUT=$(docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey@sha256:%s ' *) 2>&1)
+          # Extract digest from output (format: "sha256:...")
+          VALKEY_DIGEST=$(echo "$OUTPUT" | grep -oE 'sha256:[a-f0-9]{64}' | head -n1 || echo "")
+          if [ -z "$VALKEY_DIGEST" ]; then
+            echo "ERROR: Failed to extract Valkey manifest digest from output"
+            echo "Output: $OUTPUT"
+            exit 1
+          fi
+          echo "valkey_manifest_digest=$VALKEY_DIGEST" >> $GITHUB_OUTPUT
+          echo "Valkey manifest digest: $VALKEY_DIGEST"
+      - name: Get manifest list digests
+        id: get_manifest_digests
+        run: |
+          # Use digests captured from imagetools create, with fallback to inspect if needed
+          CONTROLLER_MANIFEST_DIGEST="${{ steps.create_manifest_controller.outputs.controller_manifest_digest }}"
+          SIDECAR_MANIFEST_DIGEST="${{ steps.create_manifest_sidecar.outputs.sidecar_manifest_digest }}"
+          VALKEY_MANIFEST_DIGEST="${{ steps.create_manifest_valkey.outputs.valkey_manifest_digest }}"
+
+          # Fallback: if digests weren't captured from create, use inspect (with retry)
+          if [ -z "$CONTROLLER_MANIFEST_DIGEST" ] || [ "$CONTROLLER_MANIFEST_DIGEST" = "" ]; then
+            echo "Warning: Controller digest not captured from create, using inspect..."
+            for i in {1..3}; do
+              CONTROLLER_MANIFEST_DIGEST=$(docker buildx imagetools inspect \
+                ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_VERSION }} \
+                --format '{{json .}}' 2>/dev/null | jq -r '.manifest.digest // .digest // empty' || echo "")
+              if [ -n "$CONTROLLER_MANIFEST_DIGEST" ] && [ "$CONTROLLER_MANIFEST_DIGEST" != "null" ]; then
+                break
+              fi
+              sleep 1
+            done
+          fi
+
+          if [ -z "$SIDECAR_MANIFEST_DIGEST" ] || [ "$SIDECAR_MANIFEST_DIGEST" = "" ]; then
+            echo "Warning: Sidecar digest not captured from create, using inspect..."
+            for i in {1..3}; do
+              SIDECAR_MANIFEST_DIGEST=$(docker buildx imagetools inspect \
+                ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ env.RELEASE_VERSION }} \
+                --format '{{json .}}' 2>/dev/null | jq -r '.manifest.digest // .digest // empty' || echo "")
+              if [ -n "$SIDECAR_MANIFEST_DIGEST" ] && [ "$SIDECAR_MANIFEST_DIGEST" != "null" ]; then
+                break
+              fi
+              sleep 1
+            done
+          fi
+
+          if [ -z "$VALKEY_MANIFEST_DIGEST" ] || [ "$VALKEY_MANIFEST_DIGEST" = "" ]; then
+            echo "Warning: Valkey digest not captured from create, using inspect..."
+            for i in {1..3}; do
+              VALKEY_MANIFEST_DIGEST=$(docker buildx imagetools inspect \
+                ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }} \
+                --format '{{json .}}' 2>/dev/null | jq -r '.manifest.digest // .digest // empty' || echo "")
+              if [ -n "$VALKEY_MANIFEST_DIGEST" ] && [ "$VALKEY_MANIFEST_DIGEST" != "null" ]; then
+                break
+              fi
+              sleep 1
+            done
+          fi
+
+          # Validate all digests
+          if [ -z "$CONTROLLER_MANIFEST_DIGEST" ] || [ "$CONTROLLER_MANIFEST_DIGEST" = "null" ]; then
+            echo "ERROR: Failed to get Controller manifest list digest"
+            exit 1
+          fi
+          if [ -z "$SIDECAR_MANIFEST_DIGEST" ] || [ "$SIDECAR_MANIFEST_DIGEST" = "null" ]; then
+            echo "ERROR: Failed to get Sidecar manifest list digest"
+            exit 1
+          fi
+          if [ -z "$VALKEY_MANIFEST_DIGEST" ] || [ "$VALKEY_MANIFEST_DIGEST" = "null" ]; then
+            echo "ERROR: Failed to get Valkey manifest list digest"
+            exit 1
+          fi
+
+          echo "controller_manifest_digest=$CONTROLLER_MANIFEST_DIGEST" >> $GITHUB_OUTPUT
+          echo "sidecar_manifest_digest=$SIDECAR_MANIFEST_DIGEST" >> $GITHUB_OUTPUT
+          echo "valkey_manifest_digest=$VALKEY_MANIFEST_DIGEST" >> $GITHUB_OUTPUT
+          echo "Controller manifest digest: $CONTROLLER_MANIFEST_DIGEST"
+          echo "Sidecar manifest digest: $SIDECAR_MANIFEST_DIGEST"
+          echo "Valkey manifest digest: $VALKEY_MANIFEST_DIGEST"
       - name: Inspect images
         run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta_controller.outputs.version }}
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ steps.meta_sidecar.outputs.version }}
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ steps.meta_valkey.outputs.version }}
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_VERSION }}
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ env.RELEASE_VERSION }}
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}
+
+  sign-and-attest:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.auto-tag.outputs.tag_created == 'true' && needs.auto-tag.outputs.tag != ''
+    needs: [auto-tag, merge-manifests]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set RELEASE_VERSION
+        run: |
+          echo "RELEASE_VERSION=${{ needs.auto-tag.outputs.tag }}" >> $GITHUB_ENV
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Log in to Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Set up Cosign
+        uses: sigstore/cosign-installer@v4
+      - name: Sign Controller manifest list
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_VERSION }}@${{ needs.merge-manifests.outputs.controller_manifest_digest }}
+      - name: Sign Sidecar manifest list
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ env.RELEASE_VERSION }}@${{ needs.merge-manifests.outputs.sidecar_manifest_digest }}
+      - name: Sign Valkey manifest list
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}@${{ needs.merge-manifests.outputs.valkey_manifest_digest }}
+      - name: Attest Controller manifest list
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ needs.merge-manifests.outputs.controller_manifest_digest }}
+          push-to-registry: true
+      - name: Attest Sidecar manifest list
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar
+          subject-digest: ${{ needs.merge-manifests.outputs.sidecar_manifest_digest }}
+          push-to-registry: true
+      - name: Attest Valkey manifest list
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey
+          subject-digest: ${{ needs.merge-manifests.outputs.valkey_manifest_digest }}
+          push-to-registry: true
 
   publish:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.auto-tag.outputs.tag_created == 'true' && needs.auto-tag.outputs.tag != ''
-    needs: [auto-tag, merge-manifests]
+    needs: [auto-tag, sign-and-attest]
     permissions:
       contents: write
       packages: write
@@ -500,8 +614,6 @@ jobs:
     needs: [auto-tag, publish]
     permissions:
       contents: write
-      packages: write
-      id-token: write
       attestations: write
     steps:
       - uses: actions/checkout@v6
@@ -532,7 +644,6 @@ jobs:
     permissions:
       contents: write
       packages: write
-      id-token: write
     steps:
       - uses: actions/checkout@v6
         with:
