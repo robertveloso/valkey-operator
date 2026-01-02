@@ -474,52 +474,41 @@ jobs:
       - name: Get manifest list digests
         id: get_manifest_digests
         run: |
-          # Use digests captured from imagetools create, with fallback to inspect if needed
+          # Use digests captured from imagetools create
           CONTROLLER_MANIFEST_DIGEST="${{ steps.create_manifest_controller.outputs.controller_manifest_digest }}"
           SIDECAR_MANIFEST_DIGEST="${{ steps.create_manifest_sidecar.outputs.sidecar_manifest_digest }}"
           VALKEY_MANIFEST_DIGEST="${{ steps.create_manifest_valkey.outputs.valkey_manifest_digest }}"
 
-          # Fallback: if digests weren't captured from create, use inspect (with retry)
+          # Validate that digests were captured from create (they should always be)
           if [ -z "$CONTROLLER_MANIFEST_DIGEST" ] || [ "$CONTROLLER_MANIFEST_DIGEST" = "" ]; then
-            echo "Warning: Controller digest not captured from create, using inspect..."
-            for i in {1..3}; do
-              CONTROLLER_MANIFEST_DIGEST=$(docker buildx imagetools inspect \
-                ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_VERSION }} \
-                --format '{{json .}}' 2>/dev/null | jq -r '.manifest.digest // .digest // empty' || echo "")
-              if [ -n "$CONTROLLER_MANIFEST_DIGEST" ] && [ "$CONTROLLER_MANIFEST_DIGEST" != "null" ]; then
-                break
-              fi
-              sleep 1
-            done
+            echo "ERROR: Controller digest not captured from imagetools create"
+            echo "This should not happen - check the create_manifest_controller step output"
+            exit 1
           fi
 
           if [ -z "$SIDECAR_MANIFEST_DIGEST" ] || [ "$SIDECAR_MANIFEST_DIGEST" = "" ]; then
-            echo "Warning: Sidecar digest not captured from create, using inspect..."
-            for i in {1..3}; do
-              SIDECAR_MANIFEST_DIGEST=$(docker buildx imagetools inspect \
-                ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ env.RELEASE_VERSION }} \
-                --format '{{json .}}' 2>/dev/null | jq -r '.manifest.digest // .digest // empty' || echo "")
-              if [ -n "$SIDECAR_MANIFEST_DIGEST" ] && [ "$SIDECAR_MANIFEST_DIGEST" != "null" ]; then
-                break
-              fi
-              sleep 1
-            done
+            echo "ERROR: Sidecar digest not captured from imagetools create"
+            echo "This should not happen - check the create_manifest_sidecar step output"
+            exit 1
           fi
 
+          # Valkey manifest list should already exist from valkey.yaml workflow
+          # Only use fallback for Valkey if digest wasn't captured
           if [ -z "$VALKEY_MANIFEST_DIGEST" ] || [ "$VALKEY_MANIFEST_DIGEST" = "" ]; then
             echo "Warning: Valkey digest not captured from create, using inspect..."
-            for i in {1..3}; do
+            for i in {1..5}; do
               VALKEY_MANIFEST_DIGEST=$(docker buildx imagetools inspect \
                 ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }} \
                 --format '{{json .}}' 2>/dev/null | jq -r '.manifest.digest // .digest // empty' || echo "")
               if [ -n "$VALKEY_MANIFEST_DIGEST" ] && [ "$VALKEY_MANIFEST_DIGEST" != "null" ]; then
                 break
               fi
-              sleep 1
+              echo "Attempt $i/5: Waiting for Valkey manifest list..."
+              sleep 2
             done
           fi
 
-          # Validate all digests
+          # Final validation
           if [ -z "$CONTROLLER_MANIFEST_DIGEST" ] || [ "$CONTROLLER_MANIFEST_DIGEST" = "null" ]; then
             echo "ERROR: Failed to get Controller manifest list digest"
             exit 1
