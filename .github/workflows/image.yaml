@@ -8,7 +8,11 @@ name: Create and publish a Docker image
 on:
   push:
     tags:
-    - '*'
+      - '*'
+  workflow_run:
+    workflows: ['Auto Tag']
+    types:
+      - completed
 
 env:
   REGISTRY: ghcr.io
@@ -19,6 +23,7 @@ env:
 jobs:
   build-and-push-image:
     runs-on: ${{ matrix.runner }}
+    if: github.event_name == 'push' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     strategy:
       fail-fast: false
       matrix:
@@ -35,135 +40,167 @@ jobs:
       attestations: write
 
     steps:
-    - name: Prepare
-      run: |
-        platform=${{ matrix.platform }}
-        echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
-    - name: Checkout repository
-      uses: actions/checkout@v6
+      - name: Prepare
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Fetch tags
+        if: github.event_name == 'workflow_run'
+        run: git fetch --tags
+      - name: Get tag from workflow_run
+        if: github.event_name == 'workflow_run'
+        id: get_tag
+        run: |
+          TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$TAG" ]; then
+            echo "No tag found, skipping"
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            echo "Found tag: $TAG"
+          fi
+      - name: Set RELEASE_VERSION
+        id: set_version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_run" ]; then
+            if [ "${{ steps.get_tag.outputs.skip }}" != "true" ]; then
+              echo "RELEASE_VERSION=${{ steps.get_tag.outputs.tag }}" >> $GITHUB_ENV
+              echo "version=${{ steps.get_tag.outputs.tag }}" >> $GITHUB_OUTPUT
+            else
+              echo "No tag found, exiting"
+              exit 1
+            fi
+          else
+            echo "RELEASE_VERSION=${{ env.RELEASE_VERSION }}" >> $GITHUB_ENV
+            echo "version=${{ env.RELEASE_VERSION }}" >> $GITHUB_OUTPUT
+          fi
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-    - name: Log in to the Container registry
-      uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to the Container registry
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Extract metadata (Controller tags, labels) for Docker
-      id: meta_controller
-      uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_VERSION }}
-    - name: Extract metadata (Sidecar tags, labels) for Docker
-      id: meta_sidecar
-      uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96
-      with:
-        images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ env.RELEASE_VERSION }}
-    - name: Extract metadata (Valkey tags, labels) for Docker
-      id: meta_valkey
-      uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96
-      with:
-        images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}
+      - name: Extract metadata (Controller tags, labels) for Docker
+        id: meta_controller
+        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_VERSION }}
+      - name: Extract metadata (Sidecar tags, labels) for Docker
+        id: meta_sidecar
+        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ env.RELEASE_VERSION }}
+      - name: Extract metadata (Valkey tags, labels) for Docker
+        id: meta_valkey
+        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}
 
-    - name: Setup Go ${{ matrix.go-version }}
-      uses: actions/setup-go@v6
-      with:
-        go-version: 1.25
-    # You can test your matrix by printing the current Go version
-    - name: Display Go version
-      run: go version
-    - name: Build it
-      id: go_build
-      run: |
-        platform=${{ matrix.platform }}
-        echo "Building for $GOOS/$GOARCH"
-        make V=1 GOOS=${platform%/*} GOARCH=${platform#*/}
-    - name: Build and push Docker image
-      id: docker_build_controller
-      uses: docker/build-push-action@v6
-      with:
-        file: Dockerfile.controller
-        context: .
-        visibility: public
-        platforms: ${{ matrix.platform }}
-        labels: ${{ steps.meta_manager.outputs.labels }}
-        outputs: type=image,"name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
-    - name: Build and push Sidecar image
-      uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
-      id: docker_build_sidecar
-      with:
-        file: Dockerfile.sidecar
-        context: .
-        visibility: public
-        platforms: ${{ matrix.platform }}
-        labels: ${{ steps.meta_sidecar.outputs.labels }}
-        outputs: type=image,"name=${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar",push-by-digest=true,name-canonical=true,push=true
-    - name: Build and push Valkey image
-      uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
-      id: docker_build_valkey
-      with:
-        file: Dockerfile.valkey
-        context: .
-        visibility: public
-        platforms: ${{ matrix.platform }}
-        labels: ${{ steps.meta_valkey.outputs.labels }}
-        outputs: type=image,"name=${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey",push-by-digest=true,name-canonical=true,push=true
+      - name: Setup Go ${{ matrix.go-version }}
+        uses: actions/setup-go@v6
+        with:
+          go-version: 1.25
+      # You can test your matrix by printing the current Go version
+      - name: Display Go version
+        run: go version
+      - name: Build it
+        id: go_build
+        run: |
+          platform=${{ matrix.platform }}
+          echo "Building for $GOOS/$GOARCH"
+          make V=1 GOOS=${platform%/*} GOARCH=${platform#*/}
+      - name: Build and push Docker image
+        id: docker_build_controller
+        uses: docker/build-push-action@v6
+        with:
+          file: Dockerfile.controller
+          context: .
+          visibility: public
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta_manager.outputs.labels }}
+          outputs: type=image,"name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
+      - name: Build and push Sidecar image
+        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
+        id: docker_build_sidecar
+        with:
+          file: Dockerfile.sidecar
+          context: .
+          visibility: public
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta_sidecar.outputs.labels }}
+          outputs: type=image,"name=${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar",push-by-digest=true,name-canonical=true,push=true
+      - name: Build and push Valkey image
+        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
+        id: docker_build_valkey
+        with:
+          file: Dockerfile.valkey
+          context: .
+          visibility: public
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta_valkey.outputs.labels }}
+          outputs: type=image,"name=${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey",push-by-digest=true,name-canonical=true,push=true
 
-    - name: Set up Cosign
-      uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
+      - name: Set up Cosign
+        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
 
-    - name: Sign Controller image with GitHub OIDC Token
-      run: |
-        cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_VERSION }}@${{ steps.docker_build_controller.outputs.digest }}
-    - name: Sign Sidecar image with GitHub OIDC Token
-      run: |
-        cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ env.RELEASE_VERSION }}@${{ steps.docker_build_sidecar.outputs.digest }}
-    - name: Sign Valkey image with GitHub OIDC Token
-      run: |
-        cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}@${{ steps.docker_build_valkey.outputs.digest }}
+      - name: Sign Controller image with GitHub OIDC Token
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_VERSION }}@${{ steps.docker_build_controller.outputs.digest }}
+      - name: Sign Sidecar image with GitHub OIDC Token
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ env.RELEASE_VERSION }}@${{ steps.docker_build_sidecar.outputs.digest }}
+      - name: Sign Valkey image with GitHub OIDC Token
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}@${{ steps.docker_build_valkey.outputs.digest }}
 
-    - name: Attest the Controller image
-      uses: actions/attest-build-provenance@v3
-      id: attest_controller
-      with:
-        subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-        subject-digest: ${{ steps.docker_build_controller.outputs.digest }}
-        push-to-registry: true
-    - name: Attest the Sidecar image
-      uses: actions/attest-build-provenance@v3
-      id: attest_sidecar
-      with:
-        subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar
-        subject-digest: ${{ steps.docker_build_sidecar.outputs.digest }}
-        push-to-registry: true
-    - name: Attest the Valkey image
-      uses: actions/attest-build-provenance@v3
-      id: attest_valkey
-      with:
-        subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey
-        subject-digest: ${{ steps.docker_build_valkey.outputs.digest }}
-        push-to-registry: true
-    - name: Export digest
-      run: |
-        mkdir -p ${{ runner.temp }}/digests/controller
-        mkdir -p ${{ runner.temp }}/digests/sidecar
-        mkdir -p ${{ runner.temp }}/digests/valkey
-        digest="${{ steps.docker_build_controller.outputs.digest }}"
-        touch "${{ runner.temp }}/digests/controller/${digest#sha256:}"
-        digest="${{ steps.docker_build_sidecar.outputs.digest }}"
-        touch "${{ runner.temp }}/digests/sidecar/${digest#sha256:}"
-        digest="${{ steps.docker_build_valkey.outputs.digest }}"
-        touch "${{ runner.temp }}/digests/valkey/${digest#sha256:}"
-    - name: Upload digest
-      uses: actions/upload-artifact@v6
-      with:
-        name: digests-${{ env.PLATFORM_PAIR }}
-        path: ${{ runner.temp }}/digests/*
-        if-no-files-found: error
-        retention-days: 1
+      - name: Attest the Controller image
+        uses: actions/attest-build-provenance@v3
+        id: attest_controller
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.docker_build_controller.outputs.digest }}
+          push-to-registry: true
+      - name: Attest the Sidecar image
+        uses: actions/attest-build-provenance@v3
+        id: attest_sidecar
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar
+          subject-digest: ${{ steps.docker_build_sidecar.outputs.digest }}
+          push-to-registry: true
+      - name: Attest the Valkey image
+        uses: actions/attest-build-provenance@v3
+        id: attest_valkey
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey
+          subject-digest: ${{ steps.docker_build_valkey.outputs.digest }}
+          push-to-registry: true
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests/controller
+          mkdir -p ${{ runner.temp }}/digests/sidecar
+          mkdir -p ${{ runner.temp }}/digests/valkey
+          digest="${{ steps.docker_build_controller.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/controller/${digest#sha256:}"
+          digest="${{ steps.docker_build_sidecar.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/sidecar/${digest#sha256:}"
+          digest="${{ steps.docker_build_valkey.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/valkey/${digest#sha256:}"
+      - name: Upload digest
+        uses: actions/upload-artifact@v6
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
   merge:
     runs-on: ubuntu-latest
     needs:

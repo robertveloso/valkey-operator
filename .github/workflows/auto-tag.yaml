@@ -16,7 +16,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # Fetch all history for tags
+          fetch-depth: 0 # Fetch all history for tags
 
       - name: Get latest tag
         id: get_tag
@@ -56,5 +56,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag "${{ steps.increment.outputs.new_tag }}"
-          git push origin "${{ steps.increment.outputs.new_tag }}"
+          git push origin "${{ steps.increment.outputs.new_tag }}" --verbose
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Output tag for other workflows
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          echo "Created tag: ${{ steps.increment.outputs.new_tag }}"
