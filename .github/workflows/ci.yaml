@@ -541,6 +541,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     steps:
       - name: Set RELEASE_VERSION
         run: |
@@ -562,12 +564,18 @@ jobs:
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
       - name: Sign Controller manifest list
+        env:
+          COSIGN_EXPERIMENTAL: 1
         run: |
           cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_VERSION }}@${{ needs.merge-manifests.outputs.controller_manifest_digest }}
       - name: Sign Sidecar manifest list
+        env:
+          COSIGN_EXPERIMENTAL: 1
         run: |
           cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ env.RELEASE_VERSION }}@${{ needs.merge-manifests.outputs.sidecar_manifest_digest }}
       - name: Sign Valkey manifest list
+        env:
+          COSIGN_EXPERIMENTAL: 1
         run: |
           cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}@${{ needs.merge-manifests.outputs.valkey_manifest_digest }}
       - name: Attest Controller manifest list

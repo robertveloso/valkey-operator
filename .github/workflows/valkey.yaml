@@ -188,6 +188,8 @@ jobs:
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
       - name: Sign Valkey manifest list
+        env:
+          COSIGN_EXPERIMENTAL: 1
         run: |
           cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}@${{ steps.get_manifest_digest.outputs.valkey_manifest_digest }}
       - name: Attest Valkey manifest list
