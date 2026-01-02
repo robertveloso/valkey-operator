@@ -68,7 +68,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # cache-to: type=gha,mode=max  # Commented out to avoid failures when GitHub Actions Cache is unavailable
           labels: ${{ steps.meta_valkey.outputs.labels }}
           tags: ${{ steps.meta_valkey.outputs.tags }}
           outputs: type=image,push=true
