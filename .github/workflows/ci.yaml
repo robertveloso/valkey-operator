@@ -578,19 +578,32 @@ jobs:
           COSIGN_EXPERIMENTAL: 1
         run: |
           cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}@${{ needs.merge-manifests.outputs.valkey_manifest_digest }}
+      - name: Debug OIDC availability
+        run: |
+          if [ -z "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
+            echo "❌ NO OIDC - ACTIONS_ID_TOKEN_REQUEST_URL not set"
+            echo "This means id-token: write permission is not working"
+            exit 1
+          else
+            echo "✅ OIDC available"
+            echo "ACTIONS_ID_TOKEN_REQUEST_URL=$ACTIONS_ID_TOKEN_REQUEST_URL"
+          fi
       - name: Attest Controller manifest list
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/attest-build-provenance@v3
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ needs.merge-manifests.outputs.controller_manifest_digest }}
           push-to-registry: true
       - name: Attest Sidecar manifest list
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/attest-build-provenance@v3
         with:
           subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar
           subject-digest: ${{ needs.merge-manifests.outputs.sidecar_manifest_digest }}
           push-to-registry: true
       - name: Attest Valkey manifest list
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/attest-build-provenance@v3
         with:
           subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey
@@ -625,6 +638,7 @@ jobs:
     needs: [auto-tag, publish]
     permissions:
       contents: write
+      id-token: write
       attestations: write
     steps:
       - uses: actions/checkout@v6
@@ -635,7 +649,18 @@ jobs:
           go-version: 1.25
       - name: Build Installer
         run: make build-installer IMG=ghcr.io/${{ github.repository_owner }}/valkey-operator:${{ needs.auto-tag.outputs.tag }}
+      - name: Debug OIDC availability
+        run: |
+          if [ -z "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
+            echo "❌ NO OIDC - ACTIONS_ID_TOKEN_REQUEST_URL not set"
+            echo "This means id-token: write permission is not working"
+            exit 1
+          else
+            echo "✅ OIDC available"
+            echo "ACTIONS_ID_TOKEN_REQUEST_URL=$ACTIONS_ID_TOKEN_REQUEST_URL"
+          fi
       - name: Attest
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/attest-build-provenance@v3
         with:
           subject-path: dist/install.yaml
