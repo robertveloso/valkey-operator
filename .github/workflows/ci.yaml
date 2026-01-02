@@ -444,20 +444,31 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey
           tags: ${{ env.VALKEY_VERSION }}
-      - name: Create manifest list (Valkey)
+      - name: Get Valkey manifest list digest
         id: create_manifest_valkey
-        working-directory: ${{ runner.temp }}/digests
         run: |
-          cd valkey
-          OUTPUT=$(docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey@sha256:%s ' *) 2>&1)
-          # Extract digest from output (format: "sha256:...")
-          VALKEY_DIGEST=$(echo "$OUTPUT" | grep -oE 'sha256:[a-f0-9]{64}' | head -n1 || echo "")
-          if [ -z "$VALKEY_DIGEST" ]; then
-            echo "ERROR: Failed to extract Valkey manifest digest from output"
-            echo "Output: $OUTPUT"
+          # Valkey is built in a separate workflow (valkey.yaml) which already creates the manifest list
+          # We just need to get the digest of the existing manifest list
+          echo "Getting Valkey manifest list digest from registry..."
+
+          for i in {1..5}; do
+            VALKEY_DIGEST=$(docker buildx imagetools inspect \
+              ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }} \
+              --format '{{json .}}' 2>/dev/null | jq -r '.manifest.digest // .digest // empty' || echo "")
+            if [ -n "$VALKEY_DIGEST" ] && [ "$VALKEY_DIGEST" != "null" ] && [ "$VALKEY_DIGEST" != "" ]; then
+              break
+            fi
+            echo "Attempt $i/5: Waiting for Valkey manifest list to be available..."
+            sleep 2
+          done
+
+          if [ -z "$VALKEY_DIGEST" ] || [ "$VALKEY_DIGEST" = "null" ]; then
+            echo "ERROR: Failed to get Valkey manifest list digest"
+            echo "Note: Valkey manifest list should be created by valkey.yaml workflow"
+            docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }} || true
             exit 1
           fi
+
           echo "valkey_manifest_digest=$VALKEY_DIGEST" >> $GITHUB_OUTPUT
           echo "Valkey manifest digest: $VALKEY_DIGEST"
       - name: Get manifest list digests

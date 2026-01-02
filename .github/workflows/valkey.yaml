@@ -7,6 +7,12 @@ on:
     paths:
       - 'Dockerfile.valkey'
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force rebuild even if Dockerfile.valkey unchanged'
+        required: false
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
@@ -87,17 +93,7 @@ jobs:
           fi
           echo "Valkey digest: $VALKEY_DIGEST"
           echo "valkey_digest=$VALKEY_DIGEST" >> $GITHUB_OUTPUT
-      - name: Set up Cosign
-        uses: sigstore/cosign-installer@v4
-      - name: Sign Valkey image
-        run: |
-          cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}@${{ steps.get_digest.outputs.valkey_digest }}
-      - name: Attest Valkey image
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey
-          subject-digest: ${{ steps.get_digest.outputs.valkey_digest }}
-          push-to-registry: true
+      # Note: Sign and Attest are done in merge-manifests job after manifest list is created
       - name: Export digest
         run: |
           mkdir -p ${{ runner.temp }}/digests/valkey
@@ -116,6 +112,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      valkey_manifest_digest: ${{ steps.get_manifest_digest.outputs.valkey_manifest_digest }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -141,11 +141,58 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey
           tags: ${{ env.VALKEY_VERSION }}
       - name: Create manifest list
+        id: create_manifest_valkey
         working-directory: ${{ runner.temp }}/digests
         run: |
           cd valkey
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey@sha256:%s ' *)
+          OUTPUT=$(docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey@sha256:%s ' *) 2>&1)
+          # Extract digest from output (format: "sha256:...")
+          VALKEY_DIGEST=$(echo "$OUTPUT" | grep -oE 'sha256:[a-f0-9]{64}' | head -n1 || echo "")
+          if [ -z "$VALKEY_DIGEST" ]; then
+            echo "ERROR: Failed to extract Valkey manifest digest from output"
+            echo "Output: $OUTPUT"
+            exit 1
+          fi
+          echo "valkey_manifest_digest=$VALKEY_DIGEST" >> $GITHUB_OUTPUT
+          echo "Valkey manifest digest: $VALKEY_DIGEST"
+      - name: Get manifest list digest
+        id: get_manifest_digest
+        run: |
+          # Use digest captured from imagetools create, with fallback to inspect if needed
+          VALKEY_MANIFEST_DIGEST="${{ steps.create_manifest_valkey.outputs.valkey_manifest_digest }}"
+
+          if [ -z "$VALKEY_MANIFEST_DIGEST" ] || [ "$VALKEY_MANIFEST_DIGEST" = "" ]; then
+            echo "Warning: Valkey digest not captured from create, using inspect..."
+            for i in {1..3}; do
+              VALKEY_MANIFEST_DIGEST=$(docker buildx imagetools inspect \
+                ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }} \
+                --format '{{json .}}' 2>/dev/null | jq -r '.manifest.digest // .digest // empty' || echo "")
+              if [ -n "$VALKEY_MANIFEST_DIGEST" ] && [ "$VALKEY_MANIFEST_DIGEST" != "null" ]; then
+                break
+              fi
+              sleep 1
+            done
+          fi
+
+          if [ -z "$VALKEY_MANIFEST_DIGEST" ] || [ "$VALKEY_MANIFEST_DIGEST" = "null" ]; then
+            echo "ERROR: Failed to get Valkey manifest list digest"
+            exit 1
+          fi
+
+          echo "valkey_manifest_digest=$VALKEY_MANIFEST_DIGEST" >> $GITHUB_OUTPUT
+          echo "Valkey manifest digest: $VALKEY_MANIFEST_DIGEST"
+      - name: Set up Cosign
+        uses: sigstore/cosign-installer@v4
+      - name: Sign Valkey manifest list
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}@${{ steps.get_manifest_digest.outputs.valkey_manifest_digest }}
+      - name: Attest Valkey manifest list
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey
+          subject-digest: ${{ steps.get_manifest_digest.outputs.valkey_manifest_digest }}
+          push-to-registry: true
       - name: Inspect image
         run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ steps.meta_valkey.outputs.version }}
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}
