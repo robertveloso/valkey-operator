@@ -64,17 +64,25 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           labels: ${{ steps.meta_valkey.outputs.labels }}
-          outputs: type=image,"name=${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey",push-by-digest=true,name-canonical=true,push=true
+          tags: ${{ steps.meta_valkey.outputs.tags }}
+          outputs: type=image,push=true
       - name: Get digest for attestation
         id: get_digest
         run: |
-          # Obter digest do Valkey usando a tag
-          VALKEY_DIGEST=$(docker buildx imagetools inspect \
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }} \
-            --format '{{json .}}' | jq -r '.manifest.digest // .digest // empty')
+          # Obter digest do Valkey usando a tag (com retry para aguardar propagação)
+          for i in {1..5}; do
+            VALKEY_DIGEST=$(docker buildx imagetools inspect \
+              ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }} \
+              --format '{{json .}}' 2>/dev/null | jq -r '.manifest.digest // .digest // empty' || echo "")
+            if [ -n "$VALKEY_DIGEST" ] && [ "$VALKEY_DIGEST" != "null" ] && [ "$VALKEY_DIGEST" != "" ]; then
+              break
+            fi
+            echo "Attempt $i/5: Waiting for Valkey image to be available..."
+            sleep 2
+          done
           if [ -z "$VALKEY_DIGEST" ] || [ "$VALKEY_DIGEST" = "null" ]; then
-            echo "ERROR: Failed to get Valkey digest"
-            docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}
+            echo "ERROR: Failed to get Valkey digest after retries"
+            docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }} || true
             exit 1
           fi
           echo "Valkey digest: $VALKEY_DIGEST"
