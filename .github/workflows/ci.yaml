@@ -1,0 +1,507 @@
+name: CI/CD
+
+on:
+  pull_request:
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile.*'
+      - 'Makefile'
+      - '.github/workflows/**'
+  push:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  VALKEY_VERSION: 9.0.1
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  security-events: write
+  attestations: write
+  actions: read
+
+jobs:
+  # ============================================
+  # PR Workflow: Fast feedback (amd64 only)
+  # ============================================
+
+  lint:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.25
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.4.0
+          args: --timeout=5m --config=.golangci.yml
+
+  hadolint:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    strategy:
+      matrix:
+        dockerfile: [Dockerfile.controller, Dockerfile.sidecar]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: ${{ matrix.dockerfile }}
+
+  gosec:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Security Scan
+        uses: securego/gosec@master
+        with:
+          args: '-fmt sarif -out results.sarif ./...'
+      - name: Upload SARIF file
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: results.sarif
+
+  build-binaries-pr:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    outputs:
+      goos: linux
+      goarch: amd64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.25
+      - name: Install build dependencies
+        run: make controller-gen
+      - name: Build binaries (amd64 only for PRs)
+        run: |
+          make V=1 GOOS=linux GOARCH=amd64 manager sidecar
+          if [ ! -f "manager" ] || [ ! -f "sidecar" ]; then
+            echo "ERROR: Build failed - binaries not found"
+            ls -la
+            exit 1
+          fi
+          echo "Build successful"
+          ls -lh manager sidecar
+      - name: Upload binaries
+        uses: actions/upload-artifact@v6
+        with:
+          name: binaries-amd64
+          path: |
+            manager
+            sidecar
+          retention-days: 1
+
+  scan-pr:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: build-binaries-pr
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: .
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          skip-dirs: |
+            vendor
+            node_modules
+            .git
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        with:
+          sarif_file: trivy-results.sarif
+
+  # ============================================
+  # Main Workflow: Full release (multi-arch)
+  # ============================================
+
+  auto-tag:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    concurrency:
+      group: release-main
+      cancel-in-progress: false
+    outputs:
+      tag: ${{ steps.increment.outputs.new_tag }}
+      tag_created: ${{ steps.check_tag.outputs.exists == 'false' }}
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Fetch all tags
+        run: git fetch --tags --force
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          TAG=$(git tag --list 'v*' --sort=-v:refname | head -n1 || echo "v0.0.0")
+          if [ -z "$TAG" ] || [ "$TAG" = "" ]; then
+            TAG="v0.0.0"
+          fi
+          echo "current_tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Current tag: $TAG"
+      - name: Increment version
+        id: increment
+        run: |
+          CURRENT_TAG="${{ steps.get_tag.outputs.current_tag }}"
+          VERSION="${CURRENT_TAG#v}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          PATCH=$((PATCH + 1))
+          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+          echo "New tag: $NEW_TAG"
+      - name: Check if tag already exists
+        id: check_tag
+        run: |
+          if git rev-parse "${{ steps.increment.outputs.new_tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Tag already exists, skipping"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Create and push tag
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.increment.outputs.new_tag }}"
+          git push origin "${{ steps.increment.outputs.new_tag }}" --verbose
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-binaries-main:
+    runs-on: ${{ matrix.runner }}
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.auto-tag.outputs.tag_created == 'true'
+    needs: auto-tag
+    concurrency:
+      group: build-${{ needs.auto-tag.outputs.tag }}-${{ matrix.platform }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - platform: linux/arm64
+            runner: blacksmith-2vcpu-ubuntu-2404-arm
+            goos: linux
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.25
+      - name: Install build dependencies
+        run: make controller-gen
+      - name: Generate manifests and code
+        run: make manifests generate
+      - name: Build binaries
+        run: |
+          DATE=$(date -u +'%Y%m%d')
+          SHA=$(git rev-parse --short HEAD)
+          VERSION="${{ needs.auto-tag.outputs.tag }}"
+          make V=1 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            DATE=$DATE SHA=$SHA VERSION=$VERSION \
+            IMG_SIDECAR=${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ needs.auto-tag.outputs.tag }} \
+            IMG_VALKEY=${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }} \
+            manager sidecar
+          if [ ! -f "manager" ] || [ ! -f "sidecar" ]; then
+            echo "ERROR: Build failed - binaries not found"
+            ls -la
+            exit 1
+          fi
+          echo "Build successful for ${{ matrix.platform }}"
+          ls -lh manager sidecar
+      - name: Upload binaries
+        uses: actions/upload-artifact@v6
+        with:
+          name: binaries-${{ matrix.platform }}
+          path: |
+            manager
+            sidecar
+          retention-days: 1
+
+  build-images:
+    runs-on: ${{ matrix.runner }}
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.auto-tag.outputs.tag_created == 'true'
+    needs: [auto-tag, build-binaries-main]
+    concurrency:
+      group: images-${{ needs.auto-tag.outputs.tag }}-${{ matrix.platform }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: blacksmith-2vcpu-ubuntu-2404-arm
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Prepare
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+          echo "RELEASE_VERSION=${{ needs.auto-tag.outputs.tag }}" >> $GITHUB_ENV
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Download binaries
+        uses: actions/download-artifact@v7
+        with:
+          name: binaries-${{ matrix.platform }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata (Controller)
+        id: meta_controller
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: ${{ env.RELEASE_VERSION }}
+      - name: Extract metadata (Sidecar)
+        id: meta_sidecar
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar
+          tags: ${{ env.RELEASE_VERSION }}
+      - name: Build and push Controller image
+        id: docker_build_controller
+        uses: docker/build-push-action@v6
+        with:
+          file: Dockerfile.controller
+          context: .
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: ${{ steps.meta_controller.outputs.labels }}
+          outputs: type=image,"name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
+      - name: Build and push Sidecar image
+        id: docker_build_sidecar
+        uses: docker/build-push-action@v6
+        with:
+          file: Dockerfile.sidecar
+          context: .
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: ${{ steps.meta_sidecar.outputs.labels }}
+          outputs: type=image,"name=${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar",push-by-digest=true,name-canonical=true,push=true
+      - name: Attest Controller image
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.docker_build_controller.outputs.digest }}
+          push-to-registry: true
+      - name: Attest Sidecar image
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar
+          subject-digest: ${{ steps.docker_build_sidecar.outputs.digest }}
+          push-to-registry: true
+      - name: Export digests
+        run: |
+          mkdir -p ${{ runner.temp }}/digests/controller
+          mkdir -p ${{ runner.temp }}/digests/sidecar
+          digest="${{ steps.docker_build_controller.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/controller/${digest#sha256:}"
+          digest="${{ steps.docker_build_sidecar.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/sidecar/${digest#sha256:}"
+      - name: Upload digests
+        uses: actions/upload-artifact@v6
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
+
+  merge-manifests:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.auto-tag.outputs.tag_created == 'true' && needs.auto-tag.outputs.tag != ''
+    needs: [auto-tag, build-images]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set RELEASE_VERSION
+        run: |
+          echo "RELEASE_VERSION=${{ needs.auto-tag.outputs.tag }}" >> $GITHUB_ENV
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Download digests
+        uses: actions/download-artifact@v7
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+      - name: Log in to Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Docker meta (Controller)
+        id: meta_controller
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: ${{ env.RELEASE_VERSION }}
+      - name: Create manifest list (Controller)
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          cd controller
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+      - name: Docker meta (Sidecar)
+        id: meta_sidecar
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar
+          tags: ${{ env.RELEASE_VERSION }}
+      - name: Create manifest list (Sidecar)
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          cd sidecar
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar@sha256:%s ' *)
+      - name: Docker meta (Valkey)
+        id: meta_valkey
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey
+          tags: ${{ env.VALKEY_VERSION }}
+      - name: Create manifest list (Valkey)
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          cd valkey
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey@sha256:%s ' *)
+      - name: Inspect images
+        run: |
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta_controller.outputs.version }}
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ steps.meta_sidecar.outputs.version }}
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ steps.meta_valkey.outputs.version }}
+
+  publish:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.auto-tag.outputs.tag_created == 'true' && needs.auto-tag.outputs.tag != ''
+    needs: [auto-tag, merge-manifests]
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Create release
+        run: |
+          TAG="${{ needs.auto-tag.outputs.tag }}"
+          if gh release view "$TAG" -R $GITHUB_REPOSITORY 2>/dev/null; then
+            echo "Release $TAG already exists, skipping creation"
+          else
+            gh release create "$TAG" --title "Release $TAG" --generate-notes -R $GITHUB_REPOSITORY
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  upload-assets:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.auto-tag.outputs.tag != ''
+    needs: [auto-tag, publish]
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.25
+      - name: Build Installer
+        run: make build-installer IMG=ghcr.io/${{ github.repository_owner }}/valkey-operator:${{ needs.auto-tag.outputs.tag }}
+      - name: Attest
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dist/install.yaml
+      - name: Upload to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: dist/install.yaml
+          asset_name: install.yaml
+          tag: ${{ needs.auto-tag.outputs.tag }}
+          overwrite: true
+
+  publish-helm:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.auto-tag.outputs.tag != ''
+    needs: [auto-tag, publish]
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.25
+      - name: Log in to Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Authenticate Helm
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
+            -u ${{ github.actor }} \
+            --password-stdin
+      - name: Package and Upload Helm Chart
+        env:
+          REGISTRY_OWNER: ${{ github.repository_owner }}
+        run: make helm-publish V=1 IMG=ghcr.io/${{ github.repository_owner }}/valkey-operator:${{ needs.auto-tag.outputs.tag }}

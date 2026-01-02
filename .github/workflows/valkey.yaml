@@ -1,0 +1,129 @@
+name: Build Valkey Image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Dockerfile.valkey'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  VALKEY_VERSION: 9.0.1
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build-valkey:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: blacksmith-2vcpu-ubuntu-2404-arm
+    concurrency:
+      group: valkey-${{ github.ref }}-${{ matrix.platform }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Prepare
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata (Valkey)
+        id: meta_valkey
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey
+          tags: ${{ env.VALKEY_VERSION }}
+      - name: Build and push Valkey image
+        id: docker_build_valkey
+        uses: docker/build-push-action@v6
+        with:
+          file: Dockerfile.valkey
+          context: .
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: ${{ steps.meta_valkey.outputs.labels }}
+          outputs: type=image,"name=${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey",push-by-digest=true,name-canonical=true,push=true
+      - name: Set up Cosign
+        uses: sigstore/cosign-installer@v4
+      - name: Sign Valkey image
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}@${{ steps.docker_build_valkey.outputs.digest }}
+      - name: Attest Valkey image
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey
+          subject-digest: ${{ steps.docker_build_valkey.outputs.digest }}
+          push-to-registry: true
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests/valkey
+          digest="${{ steps.docker_build_valkey.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/valkey/${digest#sha256:}"
+      - name: Upload digest
+        uses: actions/upload-artifact@v6
+        with:
+          name: valkey-digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
+
+  merge-manifests:
+    runs-on: ubuntu-latest
+    needs: build-valkey
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Download digests
+        uses: actions/download-artifact@v7
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: valkey-digests-*
+          merge-multiple: true
+      - name: Log in to Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Docker meta (Valkey)
+        id: meta_valkey
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey
+          tags: ${{ env.VALKEY_VERSION }}
+      - name: Create manifest list
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          cd valkey
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey@sha256:%s ' *)
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ steps.meta_valkey.outputs.version }}
