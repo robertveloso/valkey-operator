@@ -65,22 +65,36 @@ jobs:
           cache-to: type=gha,mode=max
           labels: ${{ steps.meta_valkey.outputs.labels }}
           outputs: type=image,"name=${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey",push-by-digest=true,name-canonical=true,push=true
+      - name: Get digest for attestation
+        id: get_digest
+        run: |
+          # Obter digest do Valkey usando a tag
+          VALKEY_DIGEST=$(docker buildx imagetools inspect \
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }} \
+            --format '{{json .}}' | jq -r '.manifest.digest // .digest // empty')
+          if [ -z "$VALKEY_DIGEST" ] || [ "$VALKEY_DIGEST" = "null" ]; then
+            echo "ERROR: Failed to get Valkey digest"
+            docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}
+            exit 1
+          fi
+          echo "Valkey digest: $VALKEY_DIGEST"
+          echo "valkey_digest=$VALKEY_DIGEST" >> $GITHUB_OUTPUT
       - name: Set up Cosign
         uses: sigstore/cosign-installer@v4
       - name: Sign Valkey image
         run: |
-          cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}@${{ steps.docker_build_valkey.outputs.digest }}
+          cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ env.VALKEY_VERSION }}@${{ steps.get_digest.outputs.valkey_digest }}
       - name: Attest Valkey image
         uses: actions/attest-build-provenance@v3
         with:
           subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey
-          subject-digest: ${{ steps.docker_build_valkey.outputs.digest }}
+          subject-digest: ${{ steps.get_digest.outputs.valkey_digest }}
           push-to-registry: true
       - name: Export digest
         run: |
           mkdir -p ${{ runner.temp }}/digests/valkey
-          digest="${{ steps.docker_build_valkey.outputs.digest }}"
-          touch "${{ runner.temp }}/digests/valkey/${digest#sha256:}"
+          VALKEY_DIGEST="${{ steps.get_digest.outputs.valkey_digest }}"
+          touch "${{ runner.temp }}/digests/valkey/${VALKEY_DIGEST#sha256:}"
       - name: Upload digest
         uses: actions/upload-artifact@v6
         with:

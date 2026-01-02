@@ -333,26 +333,52 @@ jobs:
           # cache-to: type=gha,mode=max
           labels: ${{ steps.meta_sidecar.outputs.labels }}
           outputs: type=image,"name=${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar",push-by-digest=true,name-canonical=true,push=true
+      - name: Get digests for attestation
+        id: get_digests
+        run: |
+          # Obter digest do Controller usando a tag
+          CONTROLLER_DIGEST=$(docker buildx imagetools inspect \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_VERSION }} \
+            --format '{{json .}}' | jq -r '.manifest.digest // .digest // empty')
+          if [ -z "$CONTROLLER_DIGEST" ] || [ "$CONTROLLER_DIGEST" = "null" ]; then
+            echo "ERROR: Failed to get Controller digest"
+            docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.RELEASE_VERSION }}
+            exit 1
+          fi
+          echo "Controller digest: $CONTROLLER_DIGEST"
+          echo "controller_digest=$CONTROLLER_DIGEST" >> $GITHUB_OUTPUT
+
+          # Obter digest do Sidecar usando a tag
+          SIDECAR_DIGEST=$(docker buildx imagetools inspect \
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ env.RELEASE_VERSION }} \
+            --format '{{json .}}' | jq -r '.manifest.digest // .digest // empty')
+          if [ -z "$SIDECAR_DIGEST" ] || [ "$SIDECAR_DIGEST" = "null" ]; then
+            echo "ERROR: Failed to get Sidecar digest"
+            docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar:${{ env.RELEASE_VERSION }}
+            exit 1
+          fi
+          echo "Sidecar digest: $SIDECAR_DIGEST"
+          echo "sidecar_digest=$SIDECAR_DIGEST" >> $GITHUB_OUTPUT
       - name: Attest Controller image
         uses: actions/attest-build-provenance@v3
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.docker_build_controller.outputs.digest }}
+          subject-digest: ${{ steps.get_digests.outputs.controller_digest }}
           push-to-registry: true
       - name: Attest Sidecar image
         uses: actions/attest-build-provenance@v3
         with:
           subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar
-          subject-digest: ${{ steps.docker_build_sidecar.outputs.digest }}
+          subject-digest: ${{ steps.get_digests.outputs.sidecar_digest }}
           push-to-registry: true
       - name: Export digests
         run: |
           mkdir -p ${{ runner.temp }}/digests/controller
           mkdir -p ${{ runner.temp }}/digests/sidecar
-          digest="${{ steps.docker_build_controller.outputs.digest }}"
-          touch "${{ runner.temp }}/digests/controller/${digest#sha256:}"
-          digest="${{ steps.docker_build_sidecar.outputs.digest }}"
-          touch "${{ runner.temp }}/digests/sidecar/${digest#sha256:}"
+          CONTROLLER_DIGEST="${{ steps.get_digests.outputs.controller_digest }}"
+          SIDECAR_DIGEST="${{ steps.get_digests.outputs.sidecar_digest }}"
+          touch "${{ runner.temp }}/digests/controller/${CONTROLLER_DIGEST#sha256:}"
+          touch "${{ runner.temp }}/digests/sidecar/${SIDECAR_DIGEST#sha256:}"
       - name: Upload digests
         uses: actions/upload-artifact@v6
         with:
