@@ -1,16 +1,13 @@
 name: publish
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - 'release-*'
-      - 'master'
-      - 'main'
-    tags:
-      - 'v*'
-      - '!pkg*'
+    inputs:
+      tag:
+        description: 'Tag version to publish (e.g., v1.0.3)'
+        required: true
+        type: string
   workflow_run:
-    workflows: ['Auto Tag']
+    workflows: ['Create and publish a Docker image']
     types:
       - completed
 
@@ -20,74 +17,94 @@ permissions:
   # id-token: write # Uncomment this line if you want to do cosign signing
 
 jobs:
-  publish:
+  resolve-tag:
     runs-on: ubuntu-latest
-    if: (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.name == 'Create and publish a Docker image')
+    outputs:
+      tag: ${{ steps.get_tag.outputs.tag }}
     steps:
-      - name: Checkout
+      - name: Download tag artifact from Auto Tag workflow
         if: github.event_name == 'workflow_run'
-        uses: actions/checkout@v6
+        uses: dawidd6/action-download-artifact@v3
         with:
-          fetch-depth: 0
-      - name: Fetch tags
+          workflow: auto-tag.yaml
+          workflow_conclusion: success
+          name: release-tag
+          path: ${{ runner.temp }}/tag
+          commit: ${{ github.event.workflow_run.head_sha }}
+      - name: Get tag from artifact
         if: github.event_name == 'workflow_run'
-        run: git fetch --tags
-      - name: Get tag from workflow_run
-        if: github.event_name == 'workflow_run'
-        id: get_tag
+        id: get_tag_artifact
         run: |
-          TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -f "${{ runner.temp }}/tag/version.txt" ]; then
+            TAG=$(cat ${{ runner.temp }}/tag/version.txt)
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            echo "Using tag from artifact: $TAG"
+          else
+            echo "ERROR: Tag artifact not found. Cannot proceed without explicit tag."
+            exit 1
+          fi
+      - name: Get tag from input (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        id: get_tag_input
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
           if [ -z "$TAG" ]; then
-            echo "No tag found"
+            echo "ERROR: Tag input is required for workflow_dispatch"
             exit 1
           fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "Found tag: $TAG"
-      - name: Create release
+          echo "Using tag from input: $TAG"
+      - name: Set unified tag output
+        id: get_tag
         run: |
           if [ "${{ github.event_name }}" == "workflow_run" ]; then
-            TAG="${{ steps.get_tag.outputs.tag }}"
+            echo "tag=${{ steps.get_tag_artifact.outputs.tag }}" >> $GITHUB_OUTPUT
           else
-            TAG="${{ github.ref_name }}"
+            echo "tag=${{ steps.get_tag_input.outputs.tag }}" >> $GITHUB_OUTPUT
           fi
-          gh release create "$TAG" --title "Release $TAG" --generate-notes -R $GITHUB_REPOSITORY
+  publish:
+    needs: resolve-tag
+    runs-on: ubuntu-latest
+    concurrency:
+      group: publish-${{ needs.resolve-tag.outputs.tag }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository at workflow commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+      - name: Create release
+        run: |
+          gh release create "${{ needs.resolve-tag.outputs.tag }}" --title "Release ${{ needs.resolve-tag.outputs.tag }}" --generate-notes -R $GITHUB_REPOSITORY
         env:
           GH_TOKEN: ${{ github.token }}
   upload-assets:
     runs-on: ubuntu-latest
-    needs: publish
+    needs: [resolve-tag, publish]
     name: Upload release assets
-    if: (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    concurrency:
+      group: publish-assets-${{ needs.resolve-tag.outputs.tag }}
+      cancel-in-progress: false
     permissions:
       contents: write
       packages: write
       id-token: write
       attestations: write
     steps:
-      - name: Checkout
+      - name: Checkout repository at workflow commit
         uses: actions/checkout@v6
         with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
-      - name: Fetch tags
-        if: github.event_name == 'workflow_run'
-        run: git fetch --tags
-      - name: Get tag
-        id: get_tag
-        run: |
-          if [ "${{ github.event_name }}" == "workflow_run" ]; then
-            TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          else
-            TAG="${{ github.ref_name }}"
-          fi
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "Using tag: $TAG"
       - name: Install Go
         uses: actions/setup-go@v6
         with:
           go-version: 1.25
           check-latest: true
       - name: Build Installer
-        run: make build-installer IMG=ghcr.io/${{ github.repository_owner }}/valkey-operator:${{ steps.get_tag.outputs.tag }}
+        run: make build-installer IMG=ghcr.io/${{ github.repository_owner }}/valkey-operator:${{ needs.resolve-tag.outputs.tag }}
       - name: Attest
         uses: actions/attest-build-provenance@v3
         id: attest
@@ -100,35 +117,25 @@ jobs:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: dist/install.yaml
           asset_name: install.yaml
-          tag: ${{ steps.get_tag.outputs.tag }}
+          tag: ${{ needs.resolve-tag.outputs.tag }}
           overwrite: true
   publish-helm:
     runs-on: ubuntu-latest
-    needs: publish
+    needs: [resolve-tag, publish]
     name: Publish Helm Chart
-    if: (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    concurrency:
+      group: publish-helm-${{ needs.resolve-tag.outputs.tag }}
+      cancel-in-progress: false
     permissions:
       contents: write
       packages: write
       id-token: write
     steps:
-      - name: Checkout
+      - name: Checkout repository at workflow commit
         uses: actions/checkout@v6
         with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
-      - name: Fetch tags
-        if: github.event_name == 'workflow_run'
-        run: git fetch --tags
-      - name: Get tag
-        id: get_tag
-        run: |
-          if [ "${{ github.event_name }}" == "workflow_run" ]; then
-            TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          else
-            TAG="${{ github.ref_name }}"
-          fi
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "Using tag: $TAG"
       - name: Install Go
         uses: actions/setup-go@v6
         with:
@@ -148,4 +155,4 @@ jobs:
       - name: Package and Upload Helm Chart
         env:
           REGISTRY_OWNER: ${{ github.repository_owner }}
-        run: make helm-publish V=1 IMG=ghcr.io/${{ github.repository_owner }}/valkey-operator:${{ steps.get_tag.outputs.tag }}
+        run: make helm-publish V=1 IMG=ghcr.io/${{ github.repository_owner }}/valkey-operator:${{ needs.resolve-tag.outputs.tag }}

@@ -1,11 +1,11 @@
 name: Scan
 
-# Run workflow each time code is pushed to your repository and on a schedule.
-# The scheduled workflow runs every at 00:00 on Sunday UTC time.
+# Run workflow on all branches except main, and on pull requests.
+# Main branch is protected and should only receive code via PR merges.
 on:
   push:
-    branches:
-    - main
+    branches-ignore:
+      - main
   pull_request:
 
 env:
@@ -13,93 +13,122 @@ env:
 
 permissions:
   contents: read
-  security-events: write
   actions: read
 
 jobs:
-  hadolint:
+  hadolint-valkey:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6
-    - uses: hadolint/hadolint-action@v3.3.0
-      with:
-        dockerfile: Dockerfile.valkey
-    - uses: hadolint/hadolint-action@v3.3.0
-      with:
-        dockerfile: Dockerfile.controller
-    - uses: hadolint/hadolint-action@v3.3.0
-      with:
-        dockerfile: Dockerfile.sidecar
+      - uses: actions/checkout@v6
+      - uses: hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: Dockerfile.valkey
+  hadolint-controller:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: Dockerfile.controller
+  hadolint-sidecar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: Dockerfile.sidecar
   gosec:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
-    - name: Check out code into the Go module directory
-      uses: actions/checkout@v6
-    - name: Security Scan
-      uses: securego/gosec@master
-      with:
-        # we let the report trigger content trigger a failure using the GitHub Security features.
-        args: '-fmt sarif -out results.sarif ./...'
-    - name: Upload SARIF file
-      if: always()
-      uses: github/codeql-action/upload-sarif@v4
-      with:
-        # Path to SARIF file relative to the root of the repository
-        sarif_file: results.sarif
+      - name: Check out code into the Go module directory
+        uses: actions/checkout@v6
+      - name: Security Scan
+        uses: securego/gosec@master
+        with:
+          # we let the report trigger content trigger a failure using the GitHub Security features.
+          args: '-fmt sarif -out results.sarif ./...'
+      - name: Upload SARIF file
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          # Path to SARIF file relative to the root of the repository
+          sarif_file: results.sarif
   golangci:
     name: lint
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/setup-go@v6
-      with:
-        go-version: 1.25
-    - uses: actions/checkout@v6
-    - name: golangci-lint
-      uses: golangci/golangci-lint-action@v9
-      with:
-        # Optional: version of golangci-lint to use in form of v1.2 or v1.2.3 or `latest` to use the latest version
-        version: v2.4.0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.25
+      - uses: actions/checkout@v6
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          # Optional: version of golangci-lint to use in form of v1.2 or v1.2.3 or `latest` to use the latest version
+          version: v2.4.0
 
-        # Optional: working directory, useful for monorepos
-        # working-directory: somedir
+          # Optional: working directory, useful for monorepos
+          # working-directory: somedir
 
-        # Optional: golangci-lint command line arguments.
-        # args: --issues-exit-code=0
-        args: --timeout=5m --config=.golangci.yml
+          # Optional: golangci-lint command line arguments.
+          # args: --issues-exit-code=0
+          args: --timeout=5m --config=.golangci.yml
 
-        # Optional: show only new issues if it's a pull request. The default value is `false`.
-        # only-new-issues: true
+          # Optional: show only new issues if it's a pull request. The default value is `false`.
+          # only-new-issues: true
 
-        # Optional: if set to true then the all caching functionality will be complete disabled,
-        #           takes precedence over all other caching options.
-        # skip-cache: true
+          # Optional: if set to true then the all caching functionality will be complete disabled,
+          #           takes precedence over all other caching options.
+          # skip-cache: true
 
-        # Optional: if set to true then the action don't cache or restore ~/go/pkg.
-        # skip-pkg-cache: true
+          # Optional: if set to true then the action don't cache or restore ~/go/pkg.
+          # skip-pkg-cache: true
 
-        # Optional: if set to true then the action don't cache or restore ~/.cache/go-build.
-        # skip-build-cache: true
-  trivy:
+          # Optional: if set to true then the action don't cache or restore ~/.cache/go-build.
+          # skip-build-cache: true
+  trivy-controller:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
-    - uses: actions/checkout@v6
-
-    - name: Build the Valkey image
-      uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
-      id: docker_build_valkey
-      with:
-        file: Dockerfile.valkey
-        context: .
-        push: false
-        tags:  ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ github.SHA }}
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey:${{ github.SHA }}
-        format: 'sarif'
-        output: 'trivy-results.sarif'
-    - name: Upload Trivy scan results to GitHub Security tab
-      uses: github/codeql-action/upload-sarif@v4
-      if: always()
-      with:
-        sarif_file: trivy-results.sarif
+      - uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: 1.25
+      - name: Install build dependencies
+        run: make controller-gen
+      - name: Build binaries
+        run: |
+          make V=1 manager sidecar
+          # Verify binaries were created
+          if [ ! -f "manager" ] || [ ! -f "sidecar" ]; then
+            echo "ERROR: Build failed - binaries not found"
+            ls -la
+            exit 1
+          fi
+          echo "Build successful - binaries created"
+          ls -lh manager sidecar
+      - name: Build the Controller image
+        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
+        id: docker_build_controller
+        with:
+          file: Dockerfile.controller
+          context: .
+          push: false
+          tags: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-operator:${{ github.SHA }}
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-operator:${{ github.SHA }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        with:
+          sarif_file: trivy-results.sarif
