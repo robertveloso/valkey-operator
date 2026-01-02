@@ -319,7 +319,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # cache-to: type=gha,mode=max
           labels: ${{ steps.meta_controller.outputs.labels }}
           outputs: type=image,"name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
       - name: Build and push Sidecar image
@@ -330,7 +330,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # cache-to: type=gha,mode=max
           labels: ${{ steps.meta_sidecar.outputs.labels }}
           outputs: type=image,"name=${{ env.REGISTRY }}/${{ github.repository_owner }}/valkey-sidecar",push-by-digest=true,name-canonical=true,push=true
       - name: Attest Controller image
