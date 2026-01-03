@@ -2700,29 +2700,37 @@ func (r *ValkeyReconciler) upsertStatefulSet(ctx context.Context, valkey *hyperv
 	}
 
 	updateReasons := make([]string, 0)
-	if !cmp.Equal(existingSts.Spec.Template.Spec.Containers[0].Env, sts.Spec.Template.Spec.Containers[0].Env) {
-		updateReasons = append(updateReasons, "env")
-	}
-	if !cmp.Equal(existingSts.Spec.Template.Spec.Containers[0].Command, sts.Spec.Template.Spec.Containers[0].Command) {
-		updateReasons = append(updateReasons, "command")
+	// Check if existing StatefulSet has containers before comparing
+	if len(existingSts.Spec.Template.Spec.Containers) > 0 && len(sts.Spec.Template.Spec.Containers) > 0 {
+		if !cmp.Equal(existingSts.Spec.Template.Spec.Containers[0].Env, sts.Spec.Template.Spec.Containers[0].Env) {
+			updateReasons = append(updateReasons, "env")
+		}
+		if !cmp.Equal(existingSts.Spec.Template.Spec.Containers[0].Command, sts.Spec.Template.Spec.Containers[0].Command) {
+			updateReasons = append(updateReasons, "command")
+		}
+		if existingSts.Spec.Template.Spec.Containers[0].Image != image {
+			sts.Spec.Template.Spec.Containers[0].Image = image
+			if valkey.Spec.VolumePermissions && len(sts.Spec.Template.Spec.InitContainers) > 0 {
+				sts.Spec.Template.Spec.InitContainers[0].Image = image
+			}
+			updateReasons = append(updateReasons, "image")
+		}
+	} else if len(existingSts.Spec.Template.Spec.Containers) == 0 {
+		// If existing StatefulSet has no containers, we need to update
+		updateReasons = append(updateReasons, "containers")
 	}
 
 	if *existingSts.Spec.Replicas != (valkey.Spec.Shards * (valkey.Spec.Replicas + 1)) {
 		replicas := valkey.Spec.Shards * (valkey.Spec.Replicas + 1)
 		sts.Spec.Replicas = &replicas
-		sts.Spec.Template.Spec.Containers[0].Env[1].Value = getNodeNames(valkey)
+		if len(sts.Spec.Template.Spec.Containers) > 0 && len(sts.Spec.Template.Spec.Containers[0].Env) > 1 {
+			sts.Spec.Template.Spec.Containers[0].Env[1].Value = getNodeNames(valkey)
+		}
 		updateReasons = append(updateReasons, "replicas")
 	}
 	if (valkey.Spec.Prometheus || valkey.Spec.ServiceMonitor) && len(existingSts.Spec.Template.Spec.Containers) == 1 {
 		sts.Spec.Template.Spec.Containers = append(sts.Spec.Template.Spec.Containers, r.exporter(valkey))
 		updateReasons = append(updateReasons, "exporter")
-	}
-	if existingSts.Spec.Template.Spec.Containers[0].Image != image {
-		sts.Spec.Template.Spec.Containers[0].Image = image
-		if valkey.Spec.VolumePermissions {
-			sts.Spec.Template.Spec.InitContainers[0].Image = image
-		}
-		updateReasons = append(updateReasons, "image")
 	}
 	if valkey.Spec.Storage != nil && len(existingSts.Spec.VolumeClaimTemplates) == 0 {
 		err = fmt.Errorf("storage has been added but cannot be updated in a statefuleset")
