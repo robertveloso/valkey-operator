@@ -19,7 +19,7 @@ metadata:
 data:
   nodes: '3'
   valkeyImage: 'ghcr.io/oxlayer/valkey:9.0.1'
-  exporterImage: 'ghcr.io/oxlayer/valkey-sidecar:v1.0.31'
+  exporterImage: 'ghcr.io/oxlayer/valkey-sidecar:v1.0.32'
 ---
 apiVersion: apps/v1
 kind: Deployment

@@ -213,15 +213,23 @@ func (r *ValkeyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if err = r.upsertStatefulSet(ctx, valkey); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err = r.initCluster(ctx, valkey); err != nil {
-		return ctrl.Result{Requeue: true, RequeueAfter: time.Second * 3}, err
-	}
-	if err = r.checkState(ctx, valkey); err != nil {
-		return ctrl.Result{Requeue: true, RequeueAfter: time.Second * 3}, nil
-	}
-	if externalType != LoadBalancer {
-		if err := r.balanceNodes(ctx, valkey); err != nil {
-			return ctrl.Result{Requeue: true, RequeueAfter: time.Second * 5}, nil
+	// Skip cluster operations in standalone mode
+	if !valkey.Spec.StandaloneMode {
+		if err = r.initCluster(ctx, valkey); err != nil {
+			return ctrl.Result{Requeue: true, RequeueAfter: time.Second * 3}, err
+		}
+		if err = r.checkState(ctx, valkey); err != nil {
+			return ctrl.Result{Requeue: true, RequeueAfter: time.Second * 3}, nil
+		}
+		if externalType != LoadBalancer {
+			if err := r.balanceNodes(ctx, valkey); err != nil {
+				return ctrl.Result{Requeue: true, RequeueAfter: time.Second * 5}, nil
+			}
+		}
+	} else {
+		// In standalone mode, just check if the pod is ready
+		if err = r.checkState(ctx, valkey); err != nil {
+			return ctrl.Result{Requeue: true, RequeueAfter: time.Second * 3}, nil
 		}
 	}
 	if !valkey.Status.Ready {
@@ -241,6 +249,16 @@ func (r *ValkeyReconciler) validateValkeySpec(valkey *hyperv1.Valkey) error {
 		valkey.Spec.Shards = r.GlobalConfig.Nodes
 		if valkey.Spec.Shards < 1 {
 			return fmt.Errorf("shards must be at least 1, got %d", valkey.Spec.Shards)
+		}
+	}
+
+	// In standalone mode, it's recommended to use 1 node and 0 replicas
+	if valkey.Spec.StandaloneMode {
+		if valkey.Spec.Shards > 1 {
+			return fmt.Errorf("in standalone mode, nodes should be 1, got %d", valkey.Spec.Shards)
+		}
+		if valkey.Spec.Replicas > 0 {
+			return fmt.Errorf("in standalone mode, replicas should be 0, got %d", valkey.Spec.Replicas)
 		}
 	}
 
@@ -310,7 +328,9 @@ func (r *ValkeyReconciler) checkState(ctx context.Context, valkey *hyperv1.Valke
 
 	initHost := fmt.Sprintf("%s.%s.svc", valkey.Name, valkey.Namespace)
 	initAddress := fmt.Sprintf("%s:%d", initHost, ValkeyPort)
-	vClient, err := r.getClient(ctx, valkey, initAddress, false)
+	// Use single client mode for standalone mode
+	singleMode := valkey.Spec.StandaloneMode
+	vClient, err := r.getClient(ctx, valkey, initAddress, singleMode)
 	if err != nil {
 		logger.Error(err, "failed to create valkey client")
 		return err
@@ -391,6 +411,23 @@ func (r *ValkeyReconciler) upsertConfigMap(ctx context.Context, valkey *hyperv1.
 		logger.Error(err, "failed to execute valkey.conf")
 		return err
 	}
+	// Replace cluster-enabled setting based on StandaloneMode
+	confStr := conf.String()
+	if valkey.Spec.StandaloneMode {
+		// Replace cluster-enabled yes with no
+		confStr = strings.ReplaceAll(confStr, "cluster-enabled yes", "cluster-enabled no")
+		// Also handle commented out lines
+		confStr = strings.ReplaceAll(confStr, "# cluster-enabled yes", "cluster-enabled no")
+	} else {
+		// Ensure cluster-enabled is yes (default)
+		if !strings.Contains(confStr, "cluster-enabled yes") && !strings.Contains(confStr, "cluster-enabled no") {
+			// If neither is present, add it
+			confStr = strings.ReplaceAll(confStr, "cluster-enabled no", "cluster-enabled yes")
+		} else if strings.Contains(confStr, "cluster-enabled no") {
+			confStr = strings.ReplaceAll(confStr, "cluster-enabled no", "cluster-enabled yes")
+		}
+	}
+	conf = bytes.NewBufferString(confStr)
 	pingReadinessLocal, err := scripts.ReadFile("scripts/ping_readiness_local.sh")
 	if err != nil {
 		logger.Error(err, "failed to read ping_readiness_local.sh")

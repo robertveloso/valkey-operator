@@ -139,6 +139,13 @@ type ValkeySpec struct {
 	// +kubebuilder:default:=false
 	// +optional
 	PlatformManagedSecurityContext bool `json:"platformManagedSecurityContext,omitempty"`
+
+	// Standalone mode (non-cluster). When true, cluster-enabled is set to no,
+	// allowing the use of multiple databases (SELECT 0-15) and disabling cluster operations.
+	// When false (default), the instance runs in cluster mode.
+	// +kubebuilder:default:=false
+	// +optional
+	StandaloneMode bool `json:"standaloneMode,omitempty"`
 }
 
 // ExternalAccess defines the external access configuration
