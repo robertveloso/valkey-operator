@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.19.0
-  name: valkeys.oxlayer
+  name: valkeys.valkey.oxlayer.dev
 spec:
-  group: oxlayer
+  group: valkey.oxlayer.dev
   names:
     kind: Valkey
     listKind: ValkeyList
